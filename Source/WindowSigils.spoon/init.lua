@@ -260,6 +260,9 @@ end
 
 function obj:_removeUnuseableWindows(windows)
   return hs.fnutils.filter(windows, function(window)
+    -- Chrome does this, and so do others
+    if window:frame().w == 0 then return false end
+    if window:frame().h == 0 then return false end
     local app = window:application()
     local bundleID
     if app ~= nil then
