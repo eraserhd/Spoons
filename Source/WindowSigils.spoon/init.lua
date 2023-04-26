@@ -222,6 +222,7 @@ function obj:start()
   self.window_filter:subscribe({
     hs.window.filter.windowCreated,
     hs.window.filter.windowDestroyed,
+    hs.window.filter.windowFocused,
     hs.window.filter.windowMoved,
     hs.window.filter.windowAllowed,
     hs.window.filter.windowRejected,
@@ -334,53 +335,6 @@ local SIGIL_WIDTH = 20
 local SIGIL_HEIGHT = 19
 local SIGIL_MARGIN = 5
 
-function obj:_makeSigilBoxes()
-  local sigil_boxes = {}
-  local windows = self:orderedWindows()
-  for i, window in ipairs(windows) do
-    local wframe = window:frame()
-    local position = { x = wframe.x + 70, y = wframe.y + 1 }
-    table.insert(sigil_boxes, {
-      sigil = self.sigils[i],
-      position = position,
-    })
-  end
-  return sigil_boxes
-end
-
-function obj:_makeSigilElements(screen_data, sigil_boxes)
-  local bounds = screen_data.screen:frame()
-
-  local function make_frame(wframe)
-    local rect = hs.geometry.toUnitRect(wframe, bounds)
-    return { x = tostring(rect.x), y = tostring(rect.y), w = tostring(rect.w), h = tostring(rect.h) }
-  end
-
-  local function append_sigil_canvas_elements(elements, position, sigil)
-    table.insert(elements, {
-      action = "fill",
-      fillColor = { alpha = 0.3, green = 1.0, blue = 1.0 },
-      frame = make_frame{x = position.x, y = position.y, w = SIGIL_WIDTH, h = SIGIL_HEIGHT},
-      type = "rectangle",
-      withShadow = false,
-    })
-    table.insert(elements, {
-      type = "text",
-      text = sigil,
-      textFont = "Menlo Regular",
-      textSize = 18,
-      textLineBreak = 'truncateTail',
-      frame = make_frame{x = position.x + 3, y = position.y - 4, w = SIGIL_WIDTH - 3, h = SIGIL_HEIGHT + 7},
-    })
-  end
-
-  local new_elements = {}
-  for i, sigil_box in ipairs(sigil_boxes) do
-    append_sigil_canvas_elements(new_elements, sigil_box.position, sigil_box.sigil)
-  end
-  return new_elements
-end
-
 local function overlapping(box1, box2)
   local corner1 = box1.position
   local corner2 = box2.position
@@ -408,6 +362,108 @@ local function move_overlapping_boxes(sigil_boxes)
   end
 end
 
+local function set_sigil_box_top(sigil_boxes, start_of_range, end_of_range)
+  if start_of_range > end_of_range then
+    return
+  end
+  local lowestFocusOrder = sigil_boxes[start_of_range].focusOrder
+  local topSigil = start_of_range
+  for i = start_of_range+1, end_of_range do
+    if sigil_boxes[i].focusOrder < lowestFocusOrder then
+      lowestFocusOrder = sigil_boxes[i].focusOrder
+      topSigil = i
+    end
+  end
+  sigil_boxes[topSigil].top = true
+end
+
+function obj:_makeSigilBoxes()
+  print("makeSigilBoxes")
+  local windows = self.window_filter:getWindows()
+  windows = self:_removeUnuseableWindows(windows)
+  self:_addEmptySpaceWindows(windows)
+  local sigil_boxes = {}
+  for i, window in ipairs(windows) do
+    local wframe = window:frame()
+    local position = { x = wframe.x + 70, y = wframe.y + 1 }
+    table.insert(sigil_boxes, {
+      position   = position,
+      id         = window:id(),
+      window     = window,
+      focusOrder = i,
+      top        = false,
+    })
+  end
+  table.sort(sigil_boxes, function(a, b)
+    local af, bf = a.position, b.position
+    if af.x < bf.x then return true end
+    if af.x > bf.x then return false end
+    if af.y < bf.y then return true end
+    if af.y > bf.y then return false end
+    -- In order to keep the sort somewhat stable, use window ids
+    local aid, bid = a.id, b.id
+    return aid < bid
+  end)
+  for i, sigil_box in ipairs(sigil_boxes) do
+    sigil_boxes[i].sigil = self.sigils[i]
+  end
+
+  -- mark as top the window with the lowest focusOrder and the same
+  -- sigil position
+  start_of_range = 1
+  for end_of_range = 2, #sigil_boxes do
+    start_position = sigil_boxes[start_of_range].position
+    end_position = sigil_boxes[end_of_range].position
+    if start_position.x ~= end_position.x or start_position.y ~= end_position.y then
+      set_sigil_box_top(sigil_boxes, start_of_range, end_of_range-1)
+      start_of_range = end_of_range
+    end
+  end
+  set_sigil_box_top(sigil_boxes, start_of_range, #sigil_boxes)
+
+  move_overlapping_boxes(sigil_boxes)
+
+  return sigil_boxes
+end
+
+function obj:_makeSigilElements(screen_data, sigil_boxes)
+  local bounds = screen_data.screen:frame()
+
+  local function make_frame(wframe)
+    local rect = hs.geometry.toUnitRect(wframe, bounds)
+    return { x = tostring(rect.x), y = tostring(rect.y), w = tostring(rect.w), h = tostring(rect.h) }
+  end
+
+  local function append_sigil_canvas_elements(elements, position, sigil, top)
+    local box = {
+      action = "fill",
+      fillColor = { alpha = 0.3, green = 1.0, blue = 1.0 },
+      frame = make_frame{x = position.x, y = position.y, w = SIGIL_WIDTH, h = SIGIL_HEIGHT},
+      type = "rectangle",
+      withShadow = false,
+    }
+    if top then
+      box.action = "strokeAndFill"
+      box.strokeColor = { white = 1.0 }
+    end
+    table.insert(elements, box)
+    table.insert(elements, {
+      type = "text",
+      text = sigil,
+      textFont = "Menlo Regular",
+      textSize = 18,
+      textLineBreak = 'truncateTail',
+      frame = make_frame{x = position.x + 3, y = position.y - 4, w = SIGIL_WIDTH - 3, h = SIGIL_HEIGHT + 7},
+    })
+  end
+
+  local new_elements = {}
+  for i, sigil_box in ipairs(sigil_boxes) do
+    append_sigil_canvas_elements(new_elements, sigil_box.position, sigil_box.sigil, sigil_box.top)
+  end
+  return new_elements
+end
+
 --- WindowSigils:refresh()
 --- Method
 --- Rerender all window sigils.
@@ -416,7 +472,6 @@ end
 ---  * None
 function obj:refresh()
   local sigil_boxes = self:_makeSigilBoxes()
-  move_overlapping_boxes(sigil_boxes)
   for _, screen_data in ipairs(self.screens) do
     local new_elements = self:_makeSigilElements(screen_data, sigil_boxes)
     screen_data.canvas:replaceElements(new_elements)
