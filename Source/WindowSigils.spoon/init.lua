@@ -273,6 +273,7 @@ function obj:_removeUnuseableWindows(windows)
     if bundleID == "com.pop.pop.app" and window:title() == "overlay" then return false end
     if bundleID == "us.zoom.xos" and window:title() == "" then return false end
     if bundleID == "com.contextsformac.Contexts" then return false end
+    if bundleID == "com.1password.1password" and window:title() == "" then return false end
     return true
   end)
 end
