@@ -247,9 +247,40 @@ end
 
 local MINIMUM_EMPTY_SIZE = 20
 
+--- WindowSigils.reservedInsets
+--- Variable
+--- Strips along the edges of every screen, in pixels, which are never offered
+--- as empty space.  A table with any of the keys `top`, `bottom`, `left` and
+--- `right`; for example `{ top = 36 }` for a status bar which is not a window.
+obj.reservedInsets = {}
+
+function obj:_reservedStrips(screen_frame)
+  local insets = self.reservedInsets
+  local top, bottom = insets.top or 0, insets.bottom or 0
+  local left, right = insets.left or 0, insets.right or 0
+  local f = screen_frame
+  local strips = {}
+  local function add(x, y, w, h)
+    if w > 0 and h > 0 then
+      table.insert(strips, EmptyWindow:new(hs.geometry.rect(x, y, w, h)))
+    end
+  end
+  add(f.x, f.y, f.w, top)
+  add(f.x, f.y + f.h - bottom, f.w, bottom)
+  add(f.x, f.y, left, f.h)
+  add(f.x + f.w - right, f.y, right, f.h)
+  return strips
+end
+
 function obj:_addEmptySpaceWindows(windows)
   local screens = hs.screen.allScreens()
-  local space_map = SpaceMap:new(screens, windows)
+  local occupied = hs.fnutils.copy(windows)
+  for _, screen in ipairs(screens) do
+    for _, strip in ipairs(self:_reservedStrips(screen:frame())) do
+      table.insert(occupied, strip)
+    end
+  end
+  local space_map = SpaceMap:new(screens, occupied)
   for _, screen in ipairs(screens) do
     for _, frame in ipairs(space_map:empty_rects_on_screen(screen:frame())) do
       if frame.w >= MINIMUM_EMPTY_SIZE and frame.h >= MINIMUM_EMPTY_SIZE then
