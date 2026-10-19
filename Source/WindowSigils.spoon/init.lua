@@ -4,8 +4,8 @@
 ---
 --- A letter or digit is rendered in the titlebar of every window (or empty space), and
 --- actions can be bound inside the sigil mode and triggered with different modifiers.
---- The `sigils` program finds the windows and empty spaces and hands out the sigils, so
---- WindowSigils.sigilsCommand must be set to its path.
+--- The `sigils` program finds the windows and empty spaces, hands out the sigils and draws
+--- them, from a daemon it starts, so WindowSigils.sigilsCommand must be set to its path.
 ---
 --- For example, with no modifiers, a sigil key can focus the window.  If the 'enter'
 --- action is bound to control-w, then 'control-w c' will focus the window with sigil 'c'.
@@ -207,45 +207,27 @@ end
 
 --- WindowSigils:start()
 --- Method
---- Starts rendering the sigils and handling hotkeys
+--- Starts the `sigils` daemon, which draws the sigils, if it isn't running
 ---
 --- Parameters:
 ---  * None
 function obj:start()
-  self.screens = hs.fnutils.map(hs.screen.allScreens(), function(screen)
-    local bounds = screen:frame()
-    local canvas = hs.canvas.new(bounds)
-    canvas:show()
-    return {
-      screen = screen,
-      canvas = canvas
-    }
-  end)
-
+  -- Only to find the hs.window objects for the sigils' window ids quickly.
   self.window_filter = hs.window.filter.new({override={
     visible = true,
   }}):setDefaultFilter({
     visible = true,
   })
-  self.window_filter:subscribe({
-    hs.window.filter.windowCreated,
-    hs.window.filter.windowDestroyed,
-    hs.window.filter.windowFocused,
-    hs.window.filter.windowMoved,
-    hs.window.filter.windowAllowed,
-    hs.window.filter.windowRejected,
-    hs.window.filter.windowNotVisible,
-    hs.window.filter.windowVisible,
-  }, function()
-    self:refresh()
-  end)
 
-  self:refresh()
+  -- Asking starts the daemon, which draws the sigils, with this spoon's sigils and insets.
+  self._sigilsTask = hs.task.new(self.sigilsCommand, function() self._sigilsTask = nil end,
+                                 self:_sigilsArguments())
+  self._sigilsTask:start()
 end
 
 --- WindowSigils:stop()
 --- Method
---- Stops rendering the sigils and handling hotkeys
+--- Stops looking up windows.  The `sigils` daemon goes on drawing the sigils
 ---
 --- Parameters:
 ---  * None
@@ -355,173 +337,6 @@ function obj:window(sigil)
   return nil
 end
 
-
-local SIGIL_WIDTH = 20
-local SIGIL_HEIGHT = 19
-local SIGIL_MARGIN = 5
-
-local function overlapping(box1, box2)
-  local corner1 = box1.position
-  local corner2 = box2.position
-  if corner2.y >= corner1.y + SIGIL_HEIGHT then return false end
-  if corner1.y >= corner2.y + SIGIL_HEIGHT then return false end
-  if corner2.x >= corner1.x + SIGIL_WIDTH + SIGIL_MARGIN then return false end
-  if corner1.x >= corner2.x + SIGIL_WIDTH + SIGIL_MARGIN then return false end
-  return true
-end
-
-local function move_overlapping_boxes(sigil_boxes)
-  table.sort(sigil_boxes, function (a, b)
-    if a.position.x < b.position.x then return true end
-    if a.position.x > b.position.x then return false end
-    if a.position.y < b.position.y then return true end
-    if a.position.y > b.position.y then return false end
-    return a.sigil < b.sigil
-  end)
-  for i, sigil_box in ipairs(sigil_boxes) do
-    local j = i+1
-    while j <= #sigil_boxes and overlapping(sigil_box, sigil_boxes[j]) do
-      sigil_boxes[j].position.x = sigil_box.position.x + SIGIL_WIDTH + SIGIL_MARGIN
-      j = j + 1
-    end
-  end
-end
-
-local function set_sigil_box_top(sigil_boxes, start_of_range, end_of_range)
-  if start_of_range > end_of_range then
-    return
-  end
-  local lowestFocusOrder = sigil_boxes[start_of_range].focusOrder
-  local topSigil = start_of_range
-  for i = start_of_range+1, end_of_range do
-    if sigil_boxes[i].focusOrder < lowestFocusOrder then
-      lowestFocusOrder = sigil_boxes[i].focusOrder
-      topSigil = i
-    end
-  end
-  sigil_boxes[topSigil].top = true
-end
-
-local function by_box_position(a, b)
-  local af, bf = a.position, b.position
-  if af.x < bf.x then return true end
-  if af.x > bf.x then return false end
-  if af.y < bf.y then return true end
-  if af.y > bf.y then return false end
-  -- In order to keep the sort somewhat stable, use window ids
-  local aid, bid = a.id, b.id
-  return aid < bid
-end
-
-function obj:_makeSigilBoxes(listing)
-  local focus_order = {}
-  for i, window in ipairs(self.window_filter:getWindows()) do
-    focus_order[window:id()] = i
-  end
-  local sigil_boxes = {}
-  for i, window in ipairs(self:_windowsFromListing(listing)) do
-    local wframe = window:frame()
-    table.insert(sigil_boxes, {
-      position   = { x = wframe.x + 70, y = wframe.y + 1 },
-      id         = window:id(),
-      window     = window,
-      focusOrder = focus_order[window:id()] or math.huge,
-      top        = false,
-      sigil      = self.sigils[i],
-    })
-  end
-  table.sort(sigil_boxes, by_box_position)
-
-  -- mark as top the window with the lowest focusOrder and the same
-  -- sigil position
-  start_of_range = 1
-  for end_of_range = 2, #sigil_boxes do
-    start_position = sigil_boxes[start_of_range].position
-    end_position = sigil_boxes[end_of_range].position
-    if start_position.x ~= end_position.x or start_position.y ~= end_position.y then
-      set_sigil_box_top(sigil_boxes, start_of_range, end_of_range-1)
-      start_of_range = end_of_range
-    end
-  end
-  set_sigil_box_top(sigil_boxes, start_of_range, #sigil_boxes)
-
-  move_overlapping_boxes(sigil_boxes)
-
-  return sigil_boxes
-end
-
-function obj:_makeSigilElements(screen_data, sigil_boxes)
-  local bounds = screen_data.screen:frame()
-
-  local function make_frame(wframe)
-    local rect = hs.geometry.toUnitRect(wframe, bounds)
-    return { x = tostring(rect.x), y = tostring(rect.y), w = tostring(rect.w), h = tostring(rect.h) }
-  end
-
-  local function append_sigil_canvas_elements(elements, position, sigil, top)
-    local box = {
-      action = "fill",
-      fillColor = { alpha = 0.3, green = 1.0, blue = 1.0 },
-      frame = make_frame{x = position.x, y = position.y, w = SIGIL_WIDTH, h = SIGIL_HEIGHT},
-      type = "rectangle",
-      withShadow = false,
-    }
-    if top then
-      box.action = "strokeAndFill"
-      box.strokeColor = { white = 1.0 }
-    end
-    table.insert(elements, box)
-    table.insert(elements, {
-      type = "text",
-      text = sigil,
-      textFont = "Menlo Regular",
-      textSize = 18,
-      textLineBreak = 'truncateTail',
-      frame = make_frame{x = position.x + 3, y = position.y - 4, w = SIGIL_WIDTH - 3, h = SIGIL_HEIGHT + 7},
-    })
-  end
-
-  local new_elements = {}
-  for i, sigil_box in ipairs(sigil_boxes) do
-    append_sigil_canvas_elements(new_elements, sigil_box.position, sigil_box.sigil, sigil_box.top)
-  end
-  return new_elements
-end
-
---- WindowSigils:refresh()
---- Method
---- Rerender all window sigils.
----
---- Parameters:
----  * None
-function obj:refresh()
-  -- Windows change in bursts, and listing them takes a moment, so `sigils` runs in
-  -- the background, once at a time, and again afterwards if anything changed.
-  if self._sigilsTask then
-    self._refreshAgain = true
-    return
-  end
-  self._sigilsTask = hs.task.new(self.sigilsCommand, function(exitCode, stdout, stderr)
-    self._sigilsTask = nil
-    if exitCode == 0 then
-      self:_render(self:_makeSigilBoxes(stdout))
-    else
-      self.logger.e("sigils failed: " .. stderr)
-    end
-    if self._refreshAgain then
-      self._refreshAgain = false
-      self:refresh()
-    end
-  end, self:_sigilsArguments())
-  self._sigilsTask:start()
-end
-
-function obj:_render(sigil_boxes)
-  for _, screen_data in ipairs(self.screens) do
-    local new_elements = self:_makeSigilElements(screen_data, sigil_boxes)
-    screen_data.canvas:replaceElements(new_elements)
-  end
-end
 
 function obj:dump()
   local result = ""
