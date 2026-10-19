@@ -96,6 +96,13 @@ obj.sigils = {
   "8", "9",
 }
 
+--- WindowSigils.sigilsCommand
+--- Variable
+--- The path of the `sigils` program, or nil to assign sigils here.  With it, windows
+--- get the sigils it gives them, so they agree with anything else which asks it, and
+--- empty spaces get the sigils left over.
+obj.sigilsCommand = nil
+
 --- WindowSigils:bindHotkeys(mapping)
 --- Method
 --- Binds hotkeys for WindowSigils
@@ -242,6 +249,9 @@ end
 --- Parameters:
 ---  * None
 function obj:stop()
+  if self._sigilsTask then
+    self._sigilsTask:terminate()
+  end
   self.window_filter = nil
 end
 
@@ -309,6 +319,64 @@ function obj:_removeUnuseableWindows(windows)
   end)
 end
 
+local function by_position(a, b)
+  local af, bf = a:frame(), b:frame()
+  if af.x < bf.x then return true end
+  if af.x > bf.x then return false end
+  if af.y < bf.y then return true end
+  if af.y > bf.y then return false end
+  -- In order to keep the sort somewhat stable, use window ids
+  local aid, bid = a:id(), b:id()
+  return aid < bid
+end
+
+local function shell_quote(s)
+  return "'" .. (s:gsub("'", "'\\''")) .. "'"
+end
+
+function obj:_sigilsArguments()
+  return { "-s", table.concat(self.sigils) }
+end
+
+function obj:_listSigils()
+  local command = shell_quote(self.sigilsCommand)
+  for _, argument in ipairs(self:_sigilsArguments()) do
+    command = command .. " " .. shell_quote(argument)
+  end
+  local output, ok = hs.execute(command)
+  if not ok then
+    self.logger.e("sigils failed")
+    return ""
+  end
+  return output
+end
+
+-- The windows listed by `sigils`, then the empty spaces around them, so that the
+-- nth one has the nth sigil.
+function obj:_windowsFromListing(listing)
+  local known = {}
+  for _, window in ipairs(self.window_filter:getWindows()) do
+    known[window:id()] = window
+  end
+  local windows = {}
+  for line in listing:gmatch("[^\n]+") do
+    local id, x, y, w, h = line:match("^%S (%d+) (%-?%d+) (%-?%d+) (%d+) (%d+) ")
+    if id then
+      id = tonumber(id)
+      local frame = hs.geometry.rect(tonumber(x), tonumber(y), tonumber(w), tonumber(h))
+      table.insert(windows, known[id] or hs.window.get(id) or EmptyWindow:new(frame))
+    end
+  end
+  local listed = #windows
+  self:_addEmptySpaceWindows(windows)
+  local empty = { table.unpack(windows, listed + 1) }
+  table.sort(empty, by_position)
+  for i = listed + 1, #windows do
+    windows[i] = i <= #self.sigils and empty[i - listed] or nil
+  end
+  return windows
+end
+
 --- WindowSigils:orderedWindows()
 --- Method
 --- A list of windows, in the order sigils are assigned.
@@ -316,19 +384,13 @@ end
 --- Parameters:
 ---  * None
 function obj:orderedWindows()
+  if self.sigilsCommand then
+    return self:_windowsFromListing(self:_listSigils())
+  end
   local windows = self.window_filter:getWindows()
   windows = self:_removeUnuseableWindows(windows)
   self:_addEmptySpaceWindows(windows)
-  table.sort(windows, function(a, b)
-    local af, bf = a:frame(), b:frame()
-    if af.x < bf.x then return true end
-    if af.x > bf.x then return false end
-    if af.y < bf.y then return true end
-    if af.y > bf.y then return false end
-    -- In order to keep the sort somewhat stable, use window ids
-    local aid, bid = a:id(), b:id()
-    return aid < bid
-  end)
+  table.sort(windows, by_position)
   return windows
 end
 
@@ -409,35 +471,53 @@ local function set_sigil_box_top(sigil_boxes, start_of_range, end_of_range)
   sigil_boxes[topSigil].top = true
 end
 
-function obj:_makeSigilBoxes()
-  print("makeSigilBoxes")
-  local windows = self.window_filter:getWindows()
-  windows = self:_removeUnuseableWindows(windows)
-  self:_addEmptySpaceWindows(windows)
+local function by_box_position(a, b)
+  local af, bf = a.position, b.position
+  if af.x < bf.x then return true end
+  if af.x > bf.x then return false end
+  if af.y < bf.y then return true end
+  if af.y > bf.y then return false end
+  -- In order to keep the sort somewhat stable, use window ids
+  local aid, bid = a.id, b.id
+  return aid < bid
+end
+
+local function make_sigil_box(window, focusOrder, sigil)
+  local wframe = window:frame()
+  return {
+    position   = { x = wframe.x + 70, y = wframe.y + 1 },
+    id         = window:id(),
+    window     = window,
+    focusOrder = focusOrder,
+    top        = false,
+    sigil      = sigil,
+  }
+end
+
+-- With a listing from `sigils`, the windows keep the sigils it gave them.
+function obj:_makeSigilBoxes(listing)
   local sigil_boxes = {}
-  for i, window in ipairs(windows) do
-    local wframe = window:frame()
-    local position = { x = wframe.x + 70, y = wframe.y + 1 }
-    table.insert(sigil_boxes, {
-      position   = position,
-      id         = window:id(),
-      window     = window,
-      focusOrder = i,
-      top        = false,
-    })
-  end
-  table.sort(sigil_boxes, function(a, b)
-    local af, bf = a.position, b.position
-    if af.x < bf.x then return true end
-    if af.x > bf.x then return false end
-    if af.y < bf.y then return true end
-    if af.y > bf.y then return false end
-    -- In order to keep the sort somewhat stable, use window ids
-    local aid, bid = a.id, b.id
-    return aid < bid
-  end)
-  for i, sigil_box in ipairs(sigil_boxes) do
-    sigil_boxes[i].sigil = self.sigils[i]
+  if listing then
+    local focus_order = {}
+    for i, window in ipairs(self.window_filter:getWindows()) do
+      focus_order[window:id()] = i
+    end
+    for i, window in ipairs(self:_windowsFromListing(listing)) do
+      local focusOrder = focus_order[window:id()] or math.huge
+      table.insert(sigil_boxes, make_sigil_box(window, focusOrder, self.sigils[i]))
+    end
+    table.sort(sigil_boxes, by_box_position)
+  else
+    local windows = self.window_filter:getWindows()
+    windows = self:_removeUnuseableWindows(windows)
+    self:_addEmptySpaceWindows(windows)
+    for i, window in ipairs(windows) do
+      table.insert(sigil_boxes, make_sigil_box(window, i))
+    end
+    table.sort(sigil_boxes, by_box_position)
+    for i, sigil_box in ipairs(sigil_boxes) do
+      sigil_boxes[i].sigil = self.sigils[i]
+    end
   end
 
   -- mark as top the window with the lowest focusOrder and the same
@@ -503,7 +583,32 @@ end
 --- Parameters:
 ---  * None
 function obj:refresh()
-  local sigil_boxes = self:_makeSigilBoxes()
+  if not self.sigilsCommand then
+    self:_render(self:_makeSigilBoxes())
+    return
+  end
+  -- Windows change in bursts, and listing them takes a moment, so `sigils` runs in
+  -- the background, once at a time, and again afterwards if anything changed.
+  if self._sigilsTask then
+    self._refreshAgain = true
+    return
+  end
+  self._sigilsTask = hs.task.new(self.sigilsCommand, function(exitCode, stdout, stderr)
+    self._sigilsTask = nil
+    if exitCode == 0 then
+      self:_render(self:_makeSigilBoxes(stdout))
+    else
+      self.logger.e("sigils failed: " .. stderr)
+    end
+    if self._refreshAgain then
+      self._refreshAgain = false
+      self:refresh()
+    end
+  end, self:_sigilsArguments())
+  self._sigilsTask:start()
+end
+
+function obj:_render(sigil_boxes)
   for _, screen_data in ipairs(self.screens) do
     local new_elements = self:_makeSigilElements(screen_data, sigil_boxes)
     screen_data.canvas:replaceElements(new_elements)
